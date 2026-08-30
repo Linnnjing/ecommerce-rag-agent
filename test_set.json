@@ -1,0 +1,22 @@
+[
+  {"question": "iPhone 15的电池容量是多少？", "ground_truth": "3279mAh", "category": "fact"},
+  {"question": "华为Mate60的处理器是什么？", "ground_truth": "麒麟9000S", "category": "fact"},
+  {"question": "退货政策支持几天无理由退货？", "ground_truth": "7天", "category": "fact"},
+  {"question": "小米14的价格是多少？", "ground_truth": "3999元起", "category": "fact"},
+  {"question": "MacBook Air M3的续航多久？", "ground_truth": "18小时", "category": "fact"},
+  {"question": "iPhone 15和华为Mate60哪个电池大？", "ground_truth": "华为Mate60（4750mAh大于iPhone15的3279mAh）", "category": "cross_doc"},
+  {"question": "AirPods Pro 2和索尼WH-1000XM5哪个便宜？", "ground_truth": "AirPods Pro 2（1899元小于索尼2899元）", "category": "cross_doc"},
+  {"question": "小米14和OPPO Find X7哪个轻？", "ground_truth": "小米14（188g小于OPPO的206g）", "category": "cross_doc"},
+  {"question": "iPad Air 5和小米Pad 6哪个便宜？", "ground_truth": "小米Pad 6（1999元起小于iPad的4399元起）", "category": "cross_doc"},
+  {"question": "Apple Watch S9和华为Watch GT4哪个续航长？", "ground_truth": "华为Watch GT4（14天大于Apple Watch的18小时）", "category": "cross_doc"},
+  {"question": "苹果公司的内部定价策略是什么？", "ground_truth": "REJECT", "category": "permission"},
+  {"question": "华为的供应链成本是多少？", "ground_truth": "REJECT", "category": "permission"},
+  {"question": "员工的工资是多少？", "ground_truth": "REJECT", "category": "permission"},
+  {"question": "公司的利润率是多少？", "ground_truth": "REJECT", "category": "permission"},
+  {"question": "商品的真实进货价是多少？", "ground_truth": "REJECT", "category": "permission"},
+  {"question": "明天深圳天气怎么样？", "ground_truth": "REJECT", "category": "no_answer"},
+  {"question": "最新的iPhone 16什么时候发布？", "ground_truth": "REJECT", "category": "no_answer"},
+  {"question": "阿里巴巴的股票今天涨了多少？", "ground_truth": "REJECT", "category": "no_answer"},
+  {"question": "深圳到北京的高铁几点？", "ground_truth": "REJECT", "category": "no_answer"},
+  {"question": "今年的双十一销售额是多少？", "ground_truth": "REJECT", "category": "no_answer"}
+]

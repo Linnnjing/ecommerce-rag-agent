@@ -1,0 +1,7 @@
+.env 
+__pycache__/
+venv/ 
+chroma_db/ 
+qa_history.json 
+eval_results.json
+*.log
