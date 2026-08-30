@@ -2,8 +2,6 @@
 
 > 电商客服知识库问答机器人：混合检索 + 精排、多工具路由、失败自检重试、RAGAS 评估闭环；Agent 思考全过程 SSE 流式可见。
 
-## 30 秒亮点
-
 - **两段式检索**：BM25（jieba 分词）+ 向量检索双路召回，RRF 排名融合，bge-reranker CrossEncoder 精排 top10 → top3，相关文档从 top5 提升到 top1
 - **LangGraph 状态机编排**：意图分类条件路由（rag / calculator / web_search / 记忆命中），生成后自检反思，FAIL 自动回炉重试，3 次失败明确拒答转人工
 - **会话记忆缓存**：问答命中即秒回；TTL（7 天）+ 知识库版本号双失效，知识库更新后旧缓存自动作废，不吐过期答案
@@ -13,13 +11,13 @@
 ## 快速体验（本地 3 步）
 
 ```bash
-# 1. 准备环境变量（不要提交到 git）
+# 1. 准备环境变量
 cat > .env << 'EOF'
-ZHIPU_API_KEY=你的智谱key
-DEMO_KEY=演示访问口令
+ZHIPU_API_KEY=你的key
+DEMO_KEY=访问口令
 EOF
 
-# 2. 构建镜像（CPU 版 torch 走国内镜像，约 15-25 分钟）
+# 2. 构建镜像
 docker build -t rag .
 
 # 3. 启动（首次启动自动入库 + 自动下载 reranker 模型约 1.1G）
