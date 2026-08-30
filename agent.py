@@ -1,4 +1,5 @@
-import os, time, logging, json
+import os, time, logging, json, threading
+from dotenv import load_dotenv
 from langchain_community.document_loaders import DirectoryLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
@@ -9,31 +10,70 @@ from langgraph.graph import StateGraph, END
 from typing import TypedDict, Annotated
 import operator, jieba
 
-API_KEY = "9f8b164567c54051aa88b29dd4cf11f3.2Bz5nd5sxvCxCOiU"
+# ---------- 路径：全部相对本文件，本地/容器通用 ----------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_DIR, ".env"))
+
+API_KEY = os.environ.get("ZHIPU_API_KEY", "")
 BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
-DOCS_DIR = os.path.expanduser("~/ecommerce_rag/data/docs")
-CHROMA_DIR = os.path.expanduser("~/ecommerce_rag/chroma_db")
-RERANKER_PATH = "/home/lzj/.cache/modelscope/models/BAAI--bge-reranker-base/snapshots/master"
-HISTORY_FILE = os.path.expanduser("~/ecommerce_rag/qa_history.json")
+DOCS_DIR = os.path.join(BASE_DIR, "data", "docs")
+CHROMA_DIR = os.path.join(BASE_DIR, "chroma_db")
+HISTORY_FILE = os.path.join(BASE_DIR, "qa_history.json")
+DOC_VERSION_FILE = os.path.join(BASE_DIR, "doc_version.txt")
+
+# 记忆有效期：7天；知识库版本变化后旧记忆自动失效
+MEMORY_TTL = 7 * 24 * 3600
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 llm = ChatOpenAI(model="glm-4-flash", openai_api_key=API_KEY, openai_api_base=BASE_URL, temperature=0)
 
-# 记忆：加载/保存历史问答
+# ---------- 记忆：加载/保存（带锁 + 过期 + 版本） ----------
+_hist_lock = threading.Lock()
+
+def _doc_version():
+    try:
+        v = open(DOC_VERSION_FILE).read().strip()
+        return v if v else "1"
+    except Exception:
+        return "1"
+
 def load_history():
     if os.path.exists(HISTORY_FILE):
-        with open(HISTORY_FILE) as f:
-            return json.load(f)
+        try:
+            with open(HISTORY_FILE) as f:
+                return json.load(f)
+        except Exception:
+            return []
     return []
 
 def save_history(question, answer):
-    history = load_history()
-    history.append({"question": question, "answer": answer, "time": time.strftime("%Y-%m-%d %H:%M:%S")})
-    with open(HISTORY_FILE, "w") as f:
-        json.dump(history, f, ensure_ascii=False, indent=2)
+    with _hist_lock:
+        history = load_history()
+        now = time.time()
+        # 顺手清理过期记忆，防止文件越滚越大
+        history = [h for h in history if now - h.get("ts", 0) < MEMORY_TTL]
+        history.append({"question": question, "answer": answer,
+                        "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "ts": now, "doc_version": _doc_version()})
+        with open(HISTORY_FILE, "w") as f:
+            json.dump(history, f, ensure_ascii=False, indent=2)
     logging.info(f"[记忆] 已保存（共{len(history)}条）")
 
-# 检索组件（复用阶段C）
+def find_memory(question):
+    """命中条件：问题匹配 + 版本一致 + 未过期。旧格式条目没有 ts 视为过期。"""
+    now = time.time()
+    for item in load_history():
+        hq = item.get("question", "")
+        matched = (question == hq
+                   or (len(question) > 5 and question in hq)
+                   or (len(hq) > 5 and hq in question))
+        if (matched
+                and item.get("doc_version") == _doc_version()
+                and now - item.get("ts", 0) < MEMORY_TTL):
+            return item
+    return None
+
+# ---------- 检索组件 ----------
 print("加载检索组件...")
 loader = DirectoryLoader(DOCS_DIR, glob="**/*.md", loader_cls=TextLoader, loader_kwargs={"encoding": "utf-8"})
 docs = loader.load()
@@ -41,13 +81,43 @@ splitter = RecursiveCharacterTextSplitter(chunk_size=512, chunk_overlap=50)
 chunks = splitter.split_documents(docs)
 embeddings = OpenAIEmbeddings(model="embedding-2", openai_api_key=API_KEY, openai_api_base=BASE_URL)
 vectorstore = Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
+
+# 容器首次启动时向量库是空的：自动入库（智谱 embedding 单次最多64条，按50分批）
+try:
+    _existing = vectorstore.get().get("ids") or []
+except Exception:
+    _existing = []
+if len(_existing) == 0:
+    print(f"向量库为空，首次入库（{len(chunks)} 块）...")
+    for i in range(0, len(chunks), 50):
+        vectorstore.add_documents(chunks[i:i+50])
+    print("入库完成。")
+
 vector_retriever = vectorstore.as_retriever(search_kwargs={"k": 10})
 
 def chinese_preprocess(text):
     return list(jieba.cut(text))
 bm25_retriever = BM25Retriever.from_documents(chunks, preprocess_func=chinese_preprocess)
 bm25_retriever.k = 10
-reranker = CrossEncoder(RERANKER_PATH)
+
+# ---------- reranker：本地有就用本地，容器里自动从国内镜像下载 ----------
+def _resolve_reranker_path():
+    candidates = [
+        os.environ.get("RERANKER_PATH", ""),
+        "/home/lzj/.cache/modelscope/models/BAAI--bge-reranker-base/snapshots/master",
+        os.path.join(BASE_DIR, ".cache_model", "bge-reranker-base"),
+    ]
+    for p in candidates:
+        if p and os.path.exists(p):
+            return p
+    print("本地未找到 reranker，从国内镜像下载（约1.2G，仅首次）...")
+    os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+    from huggingface_hub import snapshot_download
+    return snapshot_download("BAAI/bge-reranker-base",
+                             local_dir=os.path.join(BASE_DIR, ".cache_model", "bge-reranker-base"),
+                             allow_patterns=["*.json", "*.txt", "model.safetensors", "tokenizer*"])
+
+reranker = CrossEncoder(_resolve_reranker_path())
 
 def hybrid_search(query, k=3):
     bm25_docs = bm25_retriever.invoke(query)
@@ -63,13 +133,13 @@ def hybrid_search(query, k=3):
         if key not in all_docs:
             all_docs[key] = doc
     sorted_keys = sorted(rrf.keys(), key=lambda x: rrf[x], reverse=True)
-    candidates = [all_docs[k] for k in sorted_keys[:10]]
+    candidates = [all_docs[k2] for k2 in sorted_keys[:10]]
     pairs = [(query, d.page_content) for d in candidates]
     scores = reranker.predict(pairs)
     ranked = sorted(zip(scores, candidates), key=lambda x: x[0], reverse=True)
     return [d for _, d in ranked[:k]]
 
-# Agent状态（加了memory_hit）
+# ---------- Agent 状态 ----------
 class AgentState(TypedDict):
     question: str
     tool: str
@@ -79,20 +149,16 @@ class AgentState(TypedDict):
     retry_count: int
     memory_hit: bool
 
-# 节点1：意图分类（先查记忆，命中直接返回；未命中LLM分类）
+# 节点1：意图分类（先查记忆，命中直接返回）
 def classify_intent(state):
     start = time.time()
     question = state["question"]
 
-    # 先查历史记忆
-    history = load_history()
-    for item in history:
-        hq = item.get("question", "")
-        if question == hq or (len(question) > 5 and question in hq) or (len(hq) > 5 and hq in question):
-            logging.info(f"\n[记忆] 命中历史问答，直接返回（0s）")
-            return {"tool": "memory", "answer": item["answer"], "memory_hit": True}
+    hit = find_memory(question)
+    if hit:
+        logging.info(f"\n[记忆] 命中历史问答，直接返回（0s）")
+        return {"tool": "memory", "answer": hit["answer"], "memory_hit": True}
 
-    # 未命中，LLM意图分类
     prompt = f"""判断这个问题应该用哪个工具：
 - rag: 需要查文档知识（商品规格/电池容量/退货政策/运营流程/商品对比/价格/参数）
 - calculator: 需要纯数学计算（加减乘除/百分比，不涉及查文档）
@@ -147,7 +213,9 @@ def generate_answer(state):
     logging.info(f"[生成] 完成（{time.time()-start:.2f}s）")
     return {"answer": answer}
 
-# 节点4：自检（PASS时存历史）
+# 节点4：自检（PASS存记忆；3次失败明确拒答，不再硬编）
+FALLBACK_ANSWER = "抱歉，基于当前知识库无法可靠回答该问题，建议联系人工客服处理。"
+
 def reflect(state):
     start = time.time()
     logging.info(f"[自检] 检查中...")
@@ -155,13 +223,22 @@ def reflect(state):
     result = llm.invoke(f"检查答案是否忠于依据、是否回答了问题。\n\n问题：{state['question']}\n答案：{state['answer']}\n依据：{context}\n\n忠于依据且回答了问题返回PASS，否则返回FAIL。只返回PASS或FAIL。").content.strip()
     needs_retry = "FAIL" in result
     retry_count = state.get("retry_count", 0) + (1 if needs_retry else 0)
+
+    degraded = False
+    if needs_retry and retry_count >= 3:
+        # 重试3次仍不合格：明确拒答（这本身是正确的边界行为，不缓存）
+        logging.info(f"[自检] 3次未通过，降级为明确拒答")
+        needs_retry = False
+        degraded = True
+
     logging.info(f"[自检] {result}（{time.time()-start:.2f}s，重试{retry_count}次）")
-    # PASS时存历史记忆
-    if not needs_retry:
+    if not needs_retry and not degraded:
         save_history(state["question"], state["answer"])
+    if degraded:
+        return {"answer": FALLBACK_ANSWER, "needs_retry": False, "retry_count": retry_count}
     return {"needs_retry": needs_retry, "retry_count": retry_count}
 
-# 构建状态图
+# ---------- 构建状态图 ----------
 workflow = StateGraph(AgentState)
 workflow.add_node("classify", classify_intent)
 workflow.add_node("rag", rag_tool)
@@ -171,7 +248,6 @@ workflow.add_node("generate", generate_answer)
 workflow.add_node("reflect", reflect)
 
 workflow.set_entry_point("classify")
-# 条件路由：命中记忆→END，否则按意图选工具
 workflow.add_conditional_edges(
     "classify",
     lambda state: "memory" if state.get("memory_hit") else state.get("tool", "rag"),
@@ -190,15 +266,13 @@ workflow.add_conditional_edges(
 app = workflow.compile()
 
 if __name__ == "__main__":
-    # 测试：问题1问两次（第一次走rag，第二次命中记忆）
     print("\n" + "="*60 + "\n测试Agent（问题1重复问两次验证记忆）：\n")
     questions = [
-        "iPhone 15的电池容量是多少？",      # 第一次：走rag，存历史
-        "iPhone 15的电池容量是多少？",      # 第二次：命中记忆，秒回
-        "退货政策是什么？几天可以退？",      # 走rag
-        "计算 5999 减 3999 等于多少",       # 走calculator
+        "iPhone 15的电池容量是多少？",
+        "iPhone 15的电池容量是多少？",
+        "退货政策是什么？几天可以退？",
+        "计算 5999 减 3999 等于多少",
     ]
-
     for q in questions:
         print("="*60)
         result = app.invoke({"question": q, "tool": "", "tool_results": [], "answer": "", "needs_retry": False, "retry_count": 0, "memory_hit": False})
