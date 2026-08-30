@@ -6,7 +6,10 @@ from langchain_community.vectorstores import Chroma
 from langchain_community.retrievers import BM25Retriever
 import jieba
 
-API_KEY = "9f8b164567c54051aa88b29dd4cf11f3.2Bz5nd5sxvCxCOiU"
+import os
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+API_KEY = os.environ.get("ZHIPU_API_KEY", "")
 BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
 DOCS_DIR = os.path.expanduser("~/ecommerce_rag/data/docs")
 CHROMA_DIR = os.path.expanduser("~/ecommerce_rag/chroma_db")
